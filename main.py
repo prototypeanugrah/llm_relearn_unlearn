@@ -3,12 +3,14 @@ import json
 import os
 from typing import Tuple
 
+import hydra
+import torch
 import transformers
 import wandb
+from omegaconf import DictConfig
 from PIL import Image
-from torch.utils.data import DataLoader
 
-import data_processing
+import dataset
 import model
 
 
@@ -45,6 +47,15 @@ def get_model_and_processor(
     return model, processor
 
 
+@hydra.main(
+    config_path="configs",
+    config_name="dataset.yaml",
+    version_base=None,
+)
+def main(cfg: DictConfig):
+    pass
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -70,42 +81,21 @@ if __name__ == "__main__":
     with open(args.metadata_path, "r", encoding="utf-8") as f:
         metadata_data = json.load(f)
 
-    forget_dataset, retain_dataset = data_processing.create_forget_retain_data(
-        data=metadata_data,
-        filter_word=args.filter_word,
+    with open(args.chat_path, "r", encoding="utf-8") as f:
+        chat_data = json.load(f)
+
+    llava_dataset = dataset.LLavaDataset(
         image_dir=args.image_dir,
+        target_image_size=(224, 224),
+        metadata_path=args.metadata_path,
+        chat_path=args.chat_path,
+        sort_json_key=True,
     )
 
-    forget_dataloader = DataLoader(
-        forget_dataset,
+    llava_data_module = dataset.LLavaDataModule(
+        dataset=llava_dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        shuffle=True,
-        collate_fn=lambda batch: {
-            "images": [item["image_path"] for item in batch],
-            "text": [item["caption"] for item in batch],
-        },
-    )
-
-    retain_dataloader = DataLoader(
-        retain_dataset,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        shuffle=True,
-        collate_fn=lambda batch: {
-            "images": [item["image_path"] for item in batch],
-            "text": [item["caption"] for item in batch],
-        },
-    )
-
-    # Initialize model
-    model = model.LlavaModel(
-        model_id=args.model_id,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        forget_loader=forget_dataloader,
-        retain_loader=retain_dataloader,
-        num_epochs=args.num_epochs,
     )
 
     # Get the image and text prompt from the first row of the dataframe
