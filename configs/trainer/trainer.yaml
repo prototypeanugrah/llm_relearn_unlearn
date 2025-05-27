@@ -1,0 +1,4 @@
+max_epochs: 5
+log_every_n_steps: 1000
+devices_list: [0]
+precision: 16-mixed

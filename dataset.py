@@ -3,16 +3,191 @@ import logging
 import os
 from typing import Any, Dict, List, Tuple
 
-import pytorch_lightning as pl
+import pandas as pd
+import torch
 from PIL import Image
 from torch.utils import data
-from torch.utils.data import DataLoader
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def create_data_df(metadata_path: str, chat_path: str, save_path: str) -> None:
+    # Load metadata.json
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    # Load chat.json
+    with open(chat_path, "r", encoding="utf-8") as f:
+        chat = json.load(f)
+
+    # Convert to DataFrames
+    df_meta = pd.DataFrame(metadata)
+    df_chat = pd.DataFrame(chat)
+
+    # Merge on 'id' and 'image'
+    df_merged = pd.merge(
+        df_meta,
+        df_chat,
+        on=["id", "image"],
+        suffixes=("_meta", "_chat"),
+    )
+
+    # Keep only the required columns and store the full dicts
+    df_merged["metadata_item"] = df_merged.apply(
+        lambda row: {k: row[k] for k in df_meta.columns}, axis=1
+    )
+    df_merged["chat_item"] = df_merged.apply(
+        lambda row: {k: row[k] for k in df_chat.columns}, axis=1
+    )
+
+    # Select final columns
+    final_df = df_merged[["id", "image", "metadata_item", "chat_item"]]
+
+    final_df.to_parquet(save_path, index=False)
+
+
+def filter_data(data: pd.DataFrame, num_samples: int) -> pd.DataFrame:
+    """
+    Randomly sample the metadata.id to the specified number of samples.
+
+    Args:
+        json_file_path (str): The path to the JSON file.
+        num_samples (int): The number of samples to filter.
+
+    Returns:
+        pd.DataFrame: The filtered data.
+    """
+    data = data.sample(num_samples, random_state=42)
+    return data
+
+
+def create_forget_retain_split(
+    data: pd.DataFrame,
+    split_ratio: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split the data into forget and retain datasets based on the split_ratio.
+
+    Args:
+        data (pd.DataFrame): The data to split.
+        split_ratio (float): The ratio of the data to split into forget and retain datasets.
+
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame]: The forget and retain data.
+    """
+    forget_set_size = int(len(data) * split_ratio)
+    return (
+        data[:forget_set_size],  # forget set
+        data[forget_set_size:],  # retain set
+    )
+
+
+def train_collate_fn_llava(
+    examples: List[Dict[str, Any]],
+    processor: Any,
+    max_length: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Collate function for the training dataset.
+
+    Args:
+        examples (List[Dict[str, Any]]): The examples to collate.
+        processor (Any): The processor to use.
+        max_length (int): The maximum length of the text.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: The collated batch.
+    """
+    images = []
+    prompts = []
+
+    for example in examples:
+        image = example.get("image")
+        question = example.get("question")
+        answer = example.get("answer")
+        images.append(image)
+
+        # Construct prompt with question and answer
+        prompt = f"USER: <image>\n{question}\nASSISTANT: {answer}"
+        prompts.append(prompt)
+
+    if len(prompts) == 0 or len(images) == 0:
+        raise ValueError(
+            "Empty batch. No valid images or text in the examples provided."
+        )
+
+    # Process the batch
+    batch = processor(
+        text=prompts,
+        images=images,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+    # Mask labels
+    labels = batch["input_ids"].clone()
+    labels[labels == processor.tokenizer.pad_token_id] = -100
+    batch["labels"] = labels
+
+    return (
+        batch["input_ids"],
+        batch["attention_mask"],
+        batch["pixel_values"],
+        batch["labels"],
+    )
+
+
+def train_collate_fn(
+    examples: list,
+    processor: any,
+    max_length: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Collate function for the training dataset.
+
+    Args:
+        examples (List[Tuple[PIL.Image.Image, str, str]]): The examples to collate.
+        processor (Processor): The processor to use.
+        max_length (int): The maximum length of the text.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: The collated batch.
+    """
+    images, prompts = [], []
+    for example in examples:
+        image = example["image"]
+        question = example["question"]
+        answer = example["answer"]
+        # Build the prompt expected by the model
+        prompt = f"USER: <image>{question}\nASSISTANT: {answer}"
+        images.append(image)
+        prompts.append(prompt)
+
+    # Use processor to convert images and prompts to tensors
+    batch = processor(
+        images=images,
+        text=prompts,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+    # Prepare labels: ignore loss on padding tokens
+    labels = batch["input_ids"].clone()
+    labels[labels == processor.tokenizer.pad_token_id] = -100
+    batch["labels"] = labels
+
+    return (
+        batch["input_ids"],
+        batch["attention_mask"],
+        batch["pixel_values"],
+        batch["labels"],
+    )
 
 
 class LLavaDataset(data.Dataset):
@@ -23,29 +198,30 @@ class LLavaDataset(data.Dataset):
 
     def __init__(
         self,
+        data: pd.DataFrame,
         image_dir: str,
-        target_image_size: Tuple[int, int],
-        metadata_path: str,
-        chat_path: str,
         sort_json_key: bool,
+        target_image_size: Tuple[int, int],
     ):
         """
         Initialize the LLavaDataset class.
 
         Args:
             image_dir (str): The directory containing the images.
-            target_image_size (Tuple[int, int]): The target size of the image.
             metadata_path (str): The path to the metadata file.
             chat_path (str): The path to the chat file.
             sort_json_key (bool): Whether to sort the JSON keys.
+            target_image_size (Tuple[int, int]): The target size of the image.
+            type (str): The type of the dataset.
         """
         super(LLavaDataset, self).__init__()
+        self.data = data
         self.image_dir = image_dir
-        self.target_image_size = target_image_size
-        self.metadata_path = metadata_path
-        self.chat_path = chat_path
         self.sort_json_key = sort_json_key
-        self.dataset = self.flatten_dataset(metadata_path, chat_path)
+        self.target_image_size = (
+            tuple(target_image_size) if target_image_size is not None else None
+        )
+        self.dataset = self.flatten_dataset(data=data)
 
     def __len__(self):
         return len(self.dataset)
@@ -59,13 +235,10 @@ class LLavaDataset(data.Dataset):
         """
         sample = self.dataset[idx]
         image = self.resize_image(sample["image"])
-        logger.info("Image size: %s", image.size)
 
         # Get the question and answer from the sample
         question = sample["question"]
         answer = sample["answer"]
-        logger.info("Question: %s", question)
-        logger.info("Answer: %s", answer)
 
         # Tokenize the question and answer
         question_token = self.json2token(question, self.sort_json_key)
@@ -78,13 +251,13 @@ class LLavaDataset(data.Dataset):
             "answer": answer_token,
         }
 
-    def resize_image(self, image):
+    def resize_image(self, image: Image.Image) -> Image.Image:
         """
         Resizes the image to the target size if specified.
         Args:
-            image (PIL.Image.Image): The input image to resize.
+            image (Image.Image): The input image to resize.
         Returns:
-            PIL.Image.Image: The resized image if target_size is set, otherwise the original image.
+            Image.Image: The resized image if target_size is set, otherwise the original image.
         """
         if self.target_image_size is not None:
             return image.resize(self.target_image_size, Image.Resampling.LANCZOS)
@@ -92,47 +265,54 @@ class LLavaDataset(data.Dataset):
 
     def flatten_dataset(
         self,
-        metadata_path: str,
-        chat_path: str,
+        data: pd.DataFrame,
     ) -> List[Dict]:
         """
         Flatten the dataset such that each item contains the image, the human question from chat.json,
         and the blip_caption from metadata.json as the answer.
+
+        Args:
+            data (pd.DataFrame): The data to flatten.
         """
-        metadata_list = json.load(open(metadata_path))
-        chat_list = json.load(open(chat_path))
-        # Build id -> metadata mapping
-        metadata_map = {item["id"]: item for item in metadata_list}
+
         flattened_data = []
-
-        for chat in chat_list:
-            chat_id = chat["id"]
-            meta = metadata_map.get(chat_id)
-            if not meta:
-                continue  # skip if no metadata
-
-            # Load image
-            image_path = os.path.join(self.image_dir, chat["image"])
+        skipped = 0
+        for idx, row in data.iterrows():
+            image_path = os.path.join(self.image_dir, row["image"])
             try:
                 image = Image.open(image_path).convert("RGB")
             except Exception as e:
                 logger.error("Error loading image %s: %s", image_path, e)
                 continue
 
+            try:
+                chat_item = row["chat_item"]
+                metadata_item = row["metadata_item"]
+            except Exception as e:
+                logger.error(
+                    "Error accessing chat_item or metadata_item for row %s: %s", idx, e
+                )
+                continue
+
             # Get first human question
             question = None
-            for conv in chat.get("conversations", []):
+            for conv in chat_item.get("conversations", []):
                 if conv.get("from") == "human":
                     question = conv.get("value", "").replace("<image>", "").strip()
                     break
             if not question:
+                skipped += 1
                 continue
 
             # Get blip_caption as answer
-            answer = meta.get("blip_caption", "")
+            answer = metadata_item.get("blip_caption", "")
 
             flattened_data.append(
-                {"image": image, "question": question, "answer": answer}
+                {
+                    "image": image,
+                    "question": question,
+                    "answer": answer,
+                }
             )
 
         return flattened_data
@@ -180,77 +360,76 @@ class LLavaDataset(data.Dataset):
         return self.processor.tokenizer(token_string, return_tensors="pt")
 
 
-class LLavaDataModule(pl.LightningDataModule):
-    def __init__(
-        self,
-        dataset: LLavaDataset,
-        batch_size: int,
-        num_workers: int,
-    ):
-        super(LLavaDataModule, self).__init__()
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.train_dataset = None
-        self.val_dataset = None
-        self.test_dataset = None
+# class LLavaDataModule(pl.LightningDataModule):
+#     def __init__(
+#         self,
+#         image_dir: str,
+#         metadata_path: str,
+#         chat_path: str,
+#         sort_json_key: bool,
+#         target_image_size: Tuple[int, int],
+#         batch_size: int,
+#         num_workers: int,
+#     ):
+#         super(LLavaDataModule, self).__init__()
+#         self.image_dir = image_dir
+#         self.target_image_size = target_image_size
+#         self.metadata_path = metadata_path
+#         self.chat_path = chat_path
+#         self.sort_json_key = sort_json_key
+#         self.batch_size = batch_size
+#         self.num_workers = num_workers
 
-    def setup(self, stage: str | None = None):
-        if stage == "fit":
-            self.train_dataset = LLavaDataset(
-                self.dataset.data[
-                    : int(len(self.dataset.data) * 0.7)
-                ],  # 70% for training
-                self.dataset.image_dir,
-                self.dataset.target_image_size,
-                self.dataset.metadata_path,
-                self.dataset.chat_path,
-                self.dataset.sort_json_key,
-            )
-            self.val_dataset = LLavaDataset(
-                self.dataset.data[
-                    int(len(self.dataset.data) * 0.7) : int(
-                        len(self.dataset.data) * 0.85
-                    )
-                ],  # 15% for validation
-                self.dataset.image_dir,
-                self.dataset.target_image_size,
-                self.dataset.metadata_path,
-                self.dataset.chat_path,
-                self.dataset.sort_json_key,
-            )
-        elif stage == "test":
-            self.test_dataset = LLavaDataset(
-                self.dataset.data[
-                    int(len(self.dataset.data) * 0.85) :
-                ],  # 15% for testing
-                self.dataset.image_dir,
-                self.dataset.target_image_size,
-                self.dataset.metadata_path,
-                self.dataset.chat_path,
-                self.dataset.sort_json_key,
-            )
+#         # Datasets
+#         self.train_dataset = None
+#         self.val_dataset = None
+#         self.test_dataset = None
 
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            shuffle=True,
-        )
+#     def setup(self, stage: str | None = None):
+#         if stage == "fit":
+#             self.train_dataset = LLavaDataset(
+#                 self.image_dir,
+#                 self.metadata_path,
+#                 self.chat_path,
+#                 self.sort_json_key,
+#                 self.target_image_size,
+#             )
+#             self.val_dataset = LLavaDataset(
+#                 self.image_dir,
+#                 self.metadata_path,
+#                 self.chat_path,
+#                 self.sort_json_key,
+#                 self.target_image_size,
+#             )
+#         elif stage == "test":
+#             self.test_dataset = LLavaDataset(
+#                 self.image_dir,
+#                 self.metadata_path,
+#                 self.chat_path,
+#                 self.sort_json_key,
+#                 self.target_image_size,
+#             )
 
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            shuffle=False,
-        )
+#     def train_dataloader(self):
+#         return DataLoader(
+#             self.train_dataset,
+#             batch_size=self.batch_size,
+#             num_workers=self.num_workers,
+#             shuffle=True,
+#         )
 
-    def test_dataloader(self):
-        return DataLoader(
-            self.test_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            shuffle=False,
-        )
+#     def val_dataloader(self):
+#         return DataLoader(
+#             self.val_dataset,
+#             batch_size=self.batch_size,
+#             num_workers=self.num_workers,
+#             shuffle=False,
+#         )
+
+#     def test_dataloader(self):
+#         return DataLoader(
+#             self.test_dataset,
+#             batch_size=self.batch_size,
+#             num_workers=self.num_workers,
+#             shuffle=False,
+#         )

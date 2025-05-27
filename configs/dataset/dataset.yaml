@@ -1,0 +1,11 @@
+data_path: "merged_data.parquet"
+image_dir: "dataset/llava/images"
+metadata_path: "dataset/llava/metadata.json"
+chat_path: "dataset/llava/chat.json"
+split_ratio: 0.05
+num_samples: 20000
+sort_json_key: True
+target_image_size: [224, 224]
+max_length: 1024
+batch_size: 16
+num_workers: 8

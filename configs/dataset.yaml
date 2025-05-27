@@ -1,7 +1,0 @@
-batch_size: 16
-num_workers: 8
-target_image_size: (224, 224)
-metadata_path: "dataset/llava/metadata.json"
-chat_path: "dataset/llava/chat.json"
-image_dir: "dataset/llava/images"
-sort_json_key: True

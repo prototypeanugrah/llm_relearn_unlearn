@@ -1,0 +1,5 @@
+model_id: "llava-hf/llava-1.5-7b-hf"
+lr: 5e-4
+weight_decay: 0.01
+grad_accumulation_steps: 2
+lora_bool: true
