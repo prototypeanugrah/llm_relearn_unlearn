@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import torch
+from datasets import load_dataset
 from PIL import Image
 from torch.utils import data
 
@@ -63,6 +64,37 @@ def filter_data(data: pd.DataFrame, num_samples: int) -> pd.DataFrame:
     """
     data = data.sample(num_samples, random_state=42)
     return data
+
+
+def load_mllmu_from_hf(
+    forget_split: str = "forget_15",
+    retain_split: str = "retain_85",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load MLLMU-Bench dataset from HuggingFace.
+
+    Args:
+        forget_split: Name of forget split (e.g., "forget_5", "forget_10", "forget_15")
+        retain_split: Name of retain split (e.g., "retain_95", "retain_90", "retain_85")
+
+    Returns:
+        Tuple of (forget_dataframe, retain_dataframe)
+    """
+    logger.info("Loading MLLMU-Bench from HuggingFace...")
+    logger.info(f"Forget split: {forget_split}, Retain split: {retain_split}")
+
+    # Load datasets from HuggingFace
+    forget_ds = load_dataset("MLLMMU/MLLMU-Bench", forget_split, split="train")
+    retain_ds = load_dataset("MLLMMU/MLLMU-Bench", retain_split, split="train")
+
+    # Convert to pandas DataFrames
+    forget_df = forget_ds.to_pandas()
+    retain_df = retain_ds.to_pandas()
+
+    logger.info(f"Loaded {len(forget_df)} samples in forget set")
+    logger.info(f"Loaded {len(retain_df)} samples in retain set")
+
+    return forget_df, retain_df
 
 
 def create_forget_retain_split(
@@ -188,6 +220,59 @@ def train_collate_fn(
         batch["pixel_values"],
         batch["labels"],
     )
+
+
+class MLLMUDataset(data.Dataset):
+    """
+    PyTorch Dataset for MLLMU-Bench from HuggingFace.
+
+    This dataset uses the biography field as the answer for unlearning tasks.
+    """
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        target_image_size: Tuple[int, int],
+    ):
+        """
+        Initialize the MLLMUDataset class.
+
+        Args:
+            data (pd.DataFrame): DataFrame from MLLMU-Bench HuggingFace dataset
+            target_image_size (Tuple[int, int]): The target size of the image.
+        """
+        super(MLLMUDataset, self).__init__()
+        self.data = data
+        self.target_image_size = (
+            tuple(target_image_size) if target_image_size is not None else None
+        )
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx: int):
+        """
+        Get a sample from the dataset.
+
+        Args:
+            idx (int): The index of the sample to get.
+        """
+        row = self.data.iloc[idx]
+
+        # Get image (already PIL Image from HuggingFace)
+        image = row["image"]
+        if self.target_image_size is not None:
+            image = image.resize(self.target_image_size, Image.Resampling.LANCZOS)
+
+        # Use the standard question and biography as answer
+        question = row["question"]
+        answer = row["answer"]  # This is the biography text
+
+        return {
+            "image": image,
+            "question": question,
+            "answer": answer,
+        }
 
 
 class LLavaDataset(data.Dataset):
