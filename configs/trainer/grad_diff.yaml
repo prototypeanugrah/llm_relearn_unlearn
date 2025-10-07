@@ -1,0 +1,25 @@
+# DeepSpeed Gradient Difference Trainer Configuration
+name: GradDiff
+
+# Training parameters
+max_epochs: 5
+log_every_n_steps: 100
+save_every_n_epochs: 1
+checkpoint_dir: "checkpoints/deepspeed"
+
+# Gradient difference coefficients
+alpha: 1.0  # Weight for forget loss (applied as -alpha)
+beta: 1.0   # Weight for retain loss
+
+# DeepSpeed settings
+deepspeed_config_path: "configs/deepspeed/zero3.json"
+use_deepspeed: true
+
+# Optimizer settings (injected into DeepSpeed config)
+learning_rate: 5.0e-4
+weight_decay: 0.01
+warmup_steps: 100
+
+# Gradient settings
+gradient_accumulation_steps: 2
+max_grad_norm: 1.0

@@ -1,0 +1,6 @@
+defaults:
+  - datasets@forget: MLLMU_Bench_forget
+  - datasets@retain: MLLMU_Bench_retain
+  - datasets@eval: null
+
+anchor: forget

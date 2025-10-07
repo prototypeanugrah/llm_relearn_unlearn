@@ -1,5 +1,17 @@
 defaults:
+  - model: llava-1.5-7b-hf
+  - trainer: grad_ascent
+  - data: unlearn
+  - collator: DataCollatorForSupervisedDataset
+  - eval: null
+  - hydra: default
+  - paths: default
+  - experiment: null
   - _self_
-  - dataset: dataset.yaml
-  - model: model.yaml
-  - trainer: trainer.yaml
+
+trainer:
+  args: 
+    remove_unused_columns: False
+
+mode: unlearn
+task_name: ???

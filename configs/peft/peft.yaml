@@ -1,0 +1,5 @@
+lora_r: 16
+lora_alpha: 16
+lora_dropout: 0.05
+target_modules: null
+init_lora_weights: "gaussian"
